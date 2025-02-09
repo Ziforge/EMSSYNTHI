@@ -1,0 +1,122 @@
+
+classdef EMSVAFilter < audioPlugin
+    properties
+        Cutoff = 1000;  % Hz
+        Resonance = 0.7; % Q Factor (EMS Style)
+    end
+    
+    properties (Access = private)
+        SampleRate = 44100; % Default Sample Rate
+        g; % Bilinear transformed frequency
+        d = 4; % Number of diode ladder stages
+        a = 2 * 0.026; % Thermal voltage approximation for diodes
+        feedbackGain; % Gain for resonance control
+        state; % State memory for filter stages
+        fig; % Figure handle for visualization
+        plotHandle; % Plot line handle
+        graphEnabled = false; % 🔥 Internal flag (NOT visible in UI)
+    end
+    
+    properties (Constant)
+        PluginInterface = audioPluginInterface( ...
+            audioPluginParameter('Cutoff', 'DisplayName', 'Cutoff Frequency', ...
+                'Mapping', {'log', 20, 20000}, 'Style', 'rotary'), ...
+            audioPluginParameter('Resonance', 'DisplayName', 'Resonance (Q)', ...
+                'Mapping', {'lin', 0, 1.5}, 'Style', 'rotary') ...
+        );
+    end
+    
+    methods
+        function obj = EMSVAFilter()
+            obj.SampleRate = getSampleRate(obj);
+            obj.state = zeros(4,1); % Initialize state memory
+        end
+        
+        function reset(obj)
+            obj.state = zeros(4,1);
+        end
+
+        function updateCoefficients(obj)
+            wc = 2 * pi * obj.Cutoff; % Convert to angular frequency
+            wcT = 2 * obj.SampleRate * tan(wc / (2 * obj.SampleRate)); % Pre-warp cutoff
+            obj.g = wcT / obj.SampleRate; % Bilinear transform factor
+            
+            % 🔥 Maintain instability for resonance feedback
+            obj.feedbackGain = (4 * obj.Resonance);
+            
+            % **Extreme Instability at High Resonance**
+            if obj.Resonance >= 1.0
+                obj.feedbackGain = 5.0 + (obj.Resonance - 1.0) * 5;
+            end
+        end
+
+        function y = process(obj, x)
+            obj.updateCoefficients(); % Ensure coefficients are up-to-date
+
+            y = zeros(size(x)); % Initialize output buffer
+            for n = 1:length(x)
+                % 🔥 Resonance feedback for instability
+                feedbackSample = obj.diodeNonlinearity(obj.state(4)); 
+                inputSample = x(n) - obj.feedbackGain * feedbackSample;
+
+                % Process 4-stage EMS diode ladder filter
+                for stage = 1:4
+                    obj.state(stage) = obj.lowPass(inputSample, obj.state(stage));
+                    inputSample = obj.state(stage);
+                end
+
+                y(n) = obj.state(4); % Output from last stage
+            end
+            
+            % 🔥 Automatically enable graph in MATLAB (but NOT in DAWs)
+            if ~obj.graphEnabled && isMATLAB()
+                obj.initializeGraph();
+                obj.graphEnabled = true;
+            end
+            
+            % 🔥 Update graph dynamically
+            if obj.graphEnabled
+                obj.updateGraph(y);
+            end
+        end
+        
+        function y = lowPass(obj, x, prevState)
+            % First-order low-pass filter (TPT structure)
+            alpha = obj.g / (obj.g + 1);
+            y = alpha * x + (1 - alpha) * prevState;
+        end
+        
+        function y = diodeNonlinearity(obj, x)
+            % 🔥 More aggressive diode conduction model
+            y = sign(x) .* (1 - exp(-abs(10 * x)));
+        end
+        
+        function initializeGraph(obj)
+            if isempty(obj.fig) || ~isvalid(obj.fig)
+                obj.fig = figure('Name', 'EMSVAFilter Visualization', ...
+                                 'NumberTitle', 'off', ...
+                                 'Position', [100, 100, 600, 300]);
+                obj.plotHandle = plot(nan, nan, 'r', 'LineWidth', 2);
+                xlabel('Time (samples)');
+                ylabel('Amplitude');
+                title('Filter Output Movement');
+                grid on;
+                xlim([0, 1024]);
+                ylim([-1, 1]);
+            end
+        end
+
+        function updateGraph(obj, signal)
+            if isvalid(obj.fig)
+                set(obj.plotHandle, 'YData', signal(1:min(1024, length(signal))), ...
+                                    'XData', 1:min(1024, length(signal)));
+                drawnow limitrate;
+            end
+        end
+    end
+end
+
+function flag = isMATLAB()
+    % Helper function: Check if running inside MATLAB (not as a VST/AU)
+    flag = ~isdeployed && usejava('jvm');
+end
