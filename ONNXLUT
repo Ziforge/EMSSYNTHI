@@ -1,0 +1,37 @@
+% Export a trained neural network from .mat to ONNX, ensuring separate cutoff and resonance inputs
+
+% Select a .mat file containing the trained neural network
+[matFile, matPath] = uigetfile('*.mat', 'Select the Trained Neural Network File');
+if isequal(matFile, 0)
+    error('No file selected. Please select a valid .mat file containing the trained neural network.');
+end
+
+% Load the trained network
+matFilePath = fullfile(matPath, matFile);
+loadedData = load(matFilePath);
+if ~isfield(loadedData, 'net')
+    error('The selected .mat file does not contain a valid neural network object named "net".');
+end
+net = loadedData.net;
+
+% Verify input layers to ensure cutoff and resonance remain separate
+if numel(net.InputNames) ~= 2
+    error('The network does not have two separate input layers. Ensure it was trained with distinct cutoff and resonance inputs.');
+end
+
+disp('Neural network input structure verified: Cutoff and Resonance are separate.');
+
+% Specify the output ONNX file name and path
+[~, baseName, ~] = fileparts(matFile);
+onnxFileName = fullfile(matPath, [baseName, '.onnx']);
+
+% Define an exportable function to maintain separate inputs
+modelFunction = @(cutoff, resonance) predict(net, struct('cutoff', cutoff, 'resonance', resonance));
+
+% Export the neural network to ONNX format while preserving separate inputs
+exportONNXFunction(modelFunction, onnxFileName, 'InputNames', {'cutoff', 'resonance'});
+
+% Confirm successful conversion
+disp(['ONNX model successfully saved as: ', onnxFileName]);
+
+disp('The original .mat file remains unchanged.');
