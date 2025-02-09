@@ -1,0 +1,203 @@
+% Neural Network Based Filter Emulation for Audio Analysis with Batch Training and Polynomial Model Reinforcement
+% This script collects impulse responses and other relevant audio features, then trains a neural network in a batch process to emulate the filter.
+% Additionally, the script is extended to estimate the knob position based on collected audio data.
+
+% Clear workspace and command window
+clear;
+clc;
+
+% Sample rate and duration settings
+fs = 44100; % Sampling rate in Hz (44.1 kHz)
+duration = 1; % Duration in seconds
+totalRecordings = 500; % Total number of recordings
+
+% Prompt the user to select a folder to save recordings and neural network model
+recordingFolder = uigetdir('', 'Select or Create a Folder to Save Recordings and Model');
+if recordingFolder == 0
+    error('No folder selected. Please select a valid folder to save recordings and the model.');
+end
+
+% Prepare impulse signal
+impulse = zeros(duration * fs, 1); % Dirac delta impulse
+impulse(1) = 1; % Set the first sample to 1 to create the impulse signal
+
+% Set up the audio interface for playback and recording
+inputDeviceID = 0; % Set the appropriate input device ID
+outputDeviceID = 0; % Set the appropriate output device ID
+
+% Create an audio player and recorder objects
+aPlayer = audioplayer(impulse, fs, 16, outputDeviceID); % 16-bit, 44.1 kHz with specified output device ID
+aRecorder = audiorecorder(fs, 16, 1, inputDeviceID); % 16-bit, 44.1 kHz with specified input device ID
+
+% Initialize storage for data collection
+impulseResponses = [];
+frequencyResponses = [];
+energyRatios = [];
+spectralRollOffs = [];
+knobPositions = []; % Store the knob positions
+
+% Data collection loop
+stepSize = 10 / (totalRecordings - 1); % Calculate step size from 10 to 0 for 500 recordings
+
+for fileIndex = 1:totalRecordings
+    % Calculate knob position automatically
+    knobPosition = 10 - stepSize * (fileIndex - 1);
+    knobPositions(fileIndex) = knobPosition;
+
+    % Prompt user to adjust the knob and inform them of the position
+    disp(['Recording ', num2str(fileIndex), ' of 500.']);
+    disp(['Adjust the knob to position: ', num2str(knobPosition)]);
+    input('Press Enter to continue...');
+
+    % Play the impulse signal and record the response in real-time
+    try
+        record(aRecorder);
+        playblocking(aPlayer); % Play impulse signal and wait for it to complete
+
+        % Stop the recording
+        stop(aRecorder);
+        % Retrieve the recorded data
+        response = getaudiodata(aRecorder);
+        
+        % Save the recorded response to the selected folder
+        recordingFile = fullfile(recordingFolder, sprintf('impulse_response_%03d.wav', fileIndex));
+        if isfile(recordingFile)
+            delete(recordingFile); % Delete any duplicate file if it already exists
+        end
+        audiowrite(recordingFile, response, fs);
+        disp(['Recording saved to: ', recordingFile]);
+        
+        % Store the collected impulse response
+        impulseResponses(:, fileIndex) = response; % Columns represent individual impulse responses
+        
+        % Frequency response calculation
+        nfft = 2^nextpow2(length(response));
+        frequencyResponse = abs(fft(response, nfft));
+        frequencyResponses(:, fileIndex) = frequencyResponse(1:nfft/2); % Store half due to symmetry
+        
+        % Calculate energy ratios (low, mid, high)
+        energyLow = bandpower(response, fs, [20, 250]);
+        energyMid = bandpower(response, fs, [250, 4000]);
+        energyHigh = bandpower(response, fs, [4000, fs/2]);
+        energyRatios(:, fileIndex) = [energyLow; energyMid; energyHigh];
+        
+        % Spectral roll-off (point below which a percentage of the total spectral energy lies)
+        spectralRollOff = spectralRollOffPoint(response, fs, 0.85); % Example of 85% roll-off
+        spectralRollOffs(fileIndex) = spectralRollOff;
+
+    catch ME
+        warning('%s: %s', ME.identifier, ME.message);
+        break;
+    end
+end
+
+% Combine data into a single structure for training
+% Each column of 'inputs' represents a feature set for an individual impulse response
+inputs = [impulseResponses; frequencyResponses; energyRatios; spectralRollOffs];
+targets = impulseResponses; % Original impulse responses are the targets for the filter emulation
+
+% Add knob positions as a target for regression
+knobTargets = knobPositions / 10; % Normalize knob positions between 0 and 1
+
+% Define neural network architecture for batch training
+inputSize = size(inputs, 1); % Number of features
+numHiddenUnits = 128; % Number of hidden units in LSTM layer
+outputSize = size(targets, 1); % Output size matches impulse response length
+
+layers = [
+    sequenceInputLayer(inputSize)
+    lstmLayer(numHiddenUnits, 'OutputMode', 'sequence')
+    fullyConnectedLayer(outputSize)
+    regressionLayer
+];
+
+% Set training options for batch training
+options = trainingOptions('adam', ...
+    'MaxEpochs', 50, ... % Higher number of epochs for batch training
+    'GradientThreshold', 1, ...
+    'InitialLearnRate', 0.01, ...
+    'Verbose', 0, ...
+    'Plots', 'training-progress');
+
+% Train the network to emulate filter characteristics in batch mode
+disp('Starting batch training of the neural network...');
+filterNet = trainNetwork(inputs, targets, layers, options);
+disp('Batch training completed for filter emulation.');
+
+% Define an additional neural network for knob position estimation
+knobLayers = [
+    sequenceInputLayer(inputSize)
+    lstmLayer(numHiddenUnits, 'OutputMode', 'sequence')
+    fullyConnectedLayer(1) % Single output for knob position
+    regressionLayer
+];
+
+% Train the network for knob position estimation in batch mode
+disp('Starting batch training of the neural network for knob position estimation...');
+knobNet = trainNetwork(inputs, knobTargets, knobLayers, options);
+disp('Batch training completed for knob position estimation.');
+
+% Apply the trained network and polynomial model to a test signal
+testSignal = sin(2 * pi * 1000 * (0:1/fs:duration-1/fs)'); % Example 1 kHz sine wave
+
+% Reshape test signal to match expected LSTM input for prediction
+testSignalReshaped = reshape(testSignal, [], 1, 1); % Size: [sequenceLength, 1, numObservations]
+
+% Neural network prediction for filter response
+predictedOutput = predict(filterNet, testSignalReshaped);
+predictedOutput = squeeze(predictedOutput); % Remove singleton dimensions if needed
+
+% Neural network prediction for knob position
+predictedKnobPosition = predict(knobNet, testSignalReshaped) * 10; % Denormalize to 0-10 range
+disp(['Predicted Knob Position: ', num2str(predictedKnobPosition)]);
+
+% Polynomial model output
+polyOutput = applyPolyFilter(testSignal);
+
+% Compare the neural network and polynomial model outputs
+mseNNvsPoly = mean((predictedOutput - polyOutput).^2);
+
+% Display MSE between neural network output and polynomial model output
+disp(['Mean Squared Error between Neural Network and Polynomial Model Output: ', num2str(mseNNvsPoly)]);
+
+% Plot the original, predicted, and polynomial outputs
+disp('Do you want to plot the results? (y/n)');
+userResponse = input('', 's');
+if strcmpi(userResponse, 'y')
+    fig = figure('Visible', 'off');
+    subplot(3, 1, 1);
+    plot((0:length(testSignal)-1) / fs, testSignal);
+    xlabel('Time (s)');
+    ylabel('Amplitude');
+    title('Original Test Signal (1 kHz Sine Wave)');
+    grid on;
+
+    subplot(3, 1, 2);
+    plot((0:length(predictedOutput)-1) / fs, predictedOutput);
+    xlabel('Time (s)');
+    ylabel('Amplitude');
+    title('Filtered Test Signal Using Neural Network Emulated Filter');
+    grid on;
+
+    subplot(3, 1, 3);
+    plot((0:length(polyOutput)-1) / fs, polyOutput);
+    xlabel('Time (s)');
+    ylabel('Amplitude');
+    title('Filtered Test Signal Using Polynomial Model');
+    grid on;
+
+    % Save the plot
+    saveas(fig, fullfile(recordingFolder, 'filtered_test_signal_nn_vs_poly.png'));
+    close(fig);
+else
+    disp('Plotting skipped.');
+end
+
+% Function to calculate the spectral roll-off point
+function rollOff = spectralRollOffPoint(signal, fs, percentile)
+    [Pxx, F] = pwelch(signal, [], [], [], fs);
+    cumulativeEnergy = cumsum(Pxx);
+    totalEnergy = cumulativeEnergy(end);
+    rollOffIndex = find(cumulativeEnergy >= percentile * totalEnergy, 1);
+    rollOff = F(rollOffIndex);
+end
