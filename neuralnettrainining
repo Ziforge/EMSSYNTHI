@@ -1,0 +1,214 @@
+% Neural Network Based Filter Emulation for Audio Analysis with Real-Time Training and Polynomial Model Reinforcement.
+
+% Clear workspace and command window
+clear;
+clc;
+
+% Parallel Pool Setup
+disp('Setting up parallel pool...');
+if isempty(gcp('nocreate'))
+    parpool('local', maxNumCompThreads);
+else
+    disp('Parallel pool already active.');
+end
+
+% Sample rate and duration settings
+fs = 44100; % Sampling rate in Hz (44.1 kHz)
+duration = 1; % Duration in seconds
+
+% Prompt the user to select multiple folders containing recordings
+numFolders = 3; % Number of folders (0% resonance, 50% resonance, 100% resonance)
+recordingFolders = cell(1, numFolders);
+for i = 1:numFolders
+    recordingFolders{i} = uigetdir('', sprintf('Select Folder %d Containing Prerecorded Data', i));
+    if recordingFolders{i} == 0
+        error('No folder selected for folder %d. Please select a valid folder containing the recordings.', i);
+    end
+end
+
+% Initialize training data
+inputs = {}; % Placeholder for input signals
+outputs = {}; % Placeholder for target responses (filtered outputs)
+labels = []; % Placeholder for labels indicating folder (resonance setting)
+
+% Load the impulse responses from the folders
+for folderIdx = 1:numFolders
+    recordingFolder = recordingFolders{folderIdx};
+    recordingFiles = dir(fullfile(recordingFolder, 'impulse_response_*.wav'));
+    if isempty(recordingFiles)
+        error('No recording files found in the selected folder: %s', recordingFolder);
+    end
+
+    % Prepare training data by loading the impulse responses
+    for i = 1:length(recordingFiles)
+        recordingPath = fullfile(recordingFolder, recordingFiles(i).name);
+        [response, fs] = audioread(recordingPath);
+
+        % Prepare impulse (assuming all inputs are the same Dirac impulse for training)
+        impulse = zeros(duration * fs, 1);
+        impulse(1) = 1;
+
+        % Normalize the impulse and response data
+        normalizedImpulse = normalize(impulse, 'range', [-1, 1]);
+        normalizedResponse = normalize(response, 'range', [-1, 1]);
+
+        % Generate cutoff and resonance feature values
+        cutoffFeature = linspace(0, 1, length(normalizedImpulse))' * (folderIdx / numFolders); % Simulate cutoff
+        resonanceFeature = ones(size(normalizedImpulse)) * ((folderIdx - 1) / (numFolders - 1)); % Fixed resonance
+
+        % Combine features: [Impulse, Cutoff, Resonance]
+        combinedFeatures = [normalizedImpulse, cutoffFeature, resonanceFeature];
+
+        % Add combined features and corresponding response to training data
+        inputs{end+1} = combinedFeatures; % Combine features into one input
+        outputs{end+1} = normalizedResponse; % Store normalized response
+    end
+end
+
+% Align sequence lengths
+for i = 1:length(inputs)
+    minLength = min(size(inputs{i}, 1), length(outputs{i}));
+    inputs{i} = inputs{i}(1:minLength, :); % Truncate input to minLength
+    outputs{i} = outputs{i}(1:minLength); % Truncate output to minLength
+
+    % Reshape for neural network input format
+    inputs{i} = permute(inputs{i}, [2, 1]); % Reshape to [Features, TimeSteps]
+    outputs{i} = reshape(outputs{i}, [1, minLength, 1]); % Reshape to [1, SequenceLength, 1]
+end
+
+% Split data into training and validation sets
+splitRatio = 0.8; % 80% for training, 20% for validation
+numSamples = length(inputs);
+numTrain = round(splitRatio * numSamples);
+
+% Shuffle the data indices
+randIndices = randperm(numSamples);
+
+% Split the data
+trainIndices = randIndices(1:numTrain);
+valIndices = randIndices(numTrain+1:end);
+
+% Prepare training data
+trainInputs = inputs(trainIndices);
+trainOutputs = outputs(trainIndices);
+
+% Prepare validation data
+valInputs = inputs(valIndices);
+valOutputs = outputs(valIndices);
+
+% Define neural network architecture
+inputSize = 3; % Three features: test signal, cutoff value, resonance value
+outputSize = 1;
+numHiddenUnits = 256; % Increased number of hidden units to better capture complexity
+
+layers = [
+    sequenceInputLayer(inputSize)
+    lstmLayer(numHiddenUnits, 'OutputMode', 'sequence')
+    dropoutLayer(0.2) % Add dropout for regularization
+    fullyConnectedLayer(outputSize)
+    regressionLayer
+];
+
+% Set training options with validation data and early stopping
+options = trainingOptions('adam', ...
+    'MaxEpochs', 50, ... % Increase epochs for better training
+    'GradientThreshold', 1, ...
+    'InitialLearnRate', 0.001, ... % Decrease learning rate for stability
+    'Verbose', 0, ...
+    'Plots', 'training-progress', ...
+    'ValidationData', {valInputs, valOutputs}, ... % Add validation data
+    'ValidationFrequency', 10, ... % Validate every 10 iterations
+    'ExecutionEnvironment', 'parallel', ... % Utilize multiple cores
+    'OutputFcn', @(info)stopIfOverfitting(info)); % Early stopping callback
+
+% Train the neural network
+disp('Training neural network...');
+net = trainNetwork(trainInputs, trainOutputs, layers, options);
+
+% Save the trained network to a .mat file in the first folder
+save(fullfile(recordingFolders{1}, 'trainedFilterModel.mat'), 'net');
+disp(['Trained filter model saved to: ', fullfile(recordingFolders{1}, 'trainedFilterModel.mat')]);
+
+% Define the early stopping function
+function stop = stopIfOverfitting(info)
+    stop = false;
+    if info.State == "iteration" && ~isempty(info.ValidationLoss)
+        persistent bestValLoss;
+        persistent patienceCounter;
+        if isempty(bestValLoss) || info.ValidationLoss < bestValLoss
+            bestValLoss = info.ValidationLoss;
+            patienceCounter = 0;
+        else
+            patienceCounter = patienceCounter + 1;
+        end
+        if patienceCounter > 5 % Stop if validation loss doesn't improve for 5 iterations
+            stop = true;
+        end
+    end
+end
+
+% Advanced metric evaluation (PESQ, STOI, and Spectral Analysis)
+% Placeholder: Implement PESQ/STOI using appropriate MATLAB toolboxes or third-party libraries
+% Include code for advanced metric evaluations here...
+% Advanced metric evaluation: PESQ, STOI, and Spectral Analysis
+
+% Generate a test signal for evaluation (e.g., 1 kHz sine wave)
+testDuration = 10; % 10 seconds for testing
+t = (0:1/fs:testDuration-1/fs)';
+testSignal = sin(2 * pi * 1000 * t); % 1 kHz sine wave
+
+% Normalize the test signal
+normalizedTestSignal = normalize(testSignal, 'range', [-1, 1]);
+
+% Generate cutoff and resonance features for testing
+cutoffFeatureTest = linspace(0, 1, length(normalizedTestSignal))'; % Gradually varying cutoff
+resonanceFeatureTest = linspace(0, 1, length(normalizedTestSignal))'; % Gradually varying resonance
+
+% Combine test features
+combinedTestInput = [normalizedTestSignal, cutoffFeatureTest, resonanceFeatureTest]';
+testInput = reshape(combinedTestInput, [3, size(combinedTestInput, 2), 1]); % [Features, TimeSteps, BatchSize]
+
+% Neural network prediction
+disp('Evaluating test signal...');
+predictedOutput = predict(net, testInput);
+predictedOutput = squeeze(predictedOutput); % Remove singleton dimensions
+
+% Compute PESQ (if applicable toolbox is available)
+try
+    [pesqValue, ~] = pesq(fs, normalizedTestSignal, predictedOutput, 'nb');
+    disp(['PESQ Score: ', num2str(pesqValue)]);
+catch ME
+    warning('PESQ evaluation skipped: %s', ME.message);
+end
+
+% Compute STOI
+try
+    stoiValue = stoi(normalizedTestSignal, predictedOutput, fs);
+    disp(['STOI Score: ', num2str(stoiValue)]);
+catch ME
+    warning('STOI evaluation skipped: %s', ME.message);
+end
+
+% Spectral analysis
+disp('Performing spectral analysis...');
+fftOriginal = abs(fft(normalizedTestSignal));
+fftPredicted = abs(fft(predictedOutput));
+freqs = (0:length(fftOriginal)-1) * (fs / length(fftOriginal));
+
+% Plot spectral analysis
+figure('Name', 'Spectral Analysis');
+subplot(2, 1, 1);
+plot(freqs, 20*log10(fftOriginal));
+title('Original Signal Spectrum');
+xlabel('Frequency (Hz)');
+ylabel('Magnitude (dB)');
+grid on;
+
+subplot(2, 1, 2);
+plot(freqs, 20*log10(fftPredicted));
+title('Filtered Signal Spectrum');
+xlabel('Frequency (Hz)');
+ylabel('Magnitude (dB)');
+grid on;
+
+disp('Advanced metric evaluation complete.');
