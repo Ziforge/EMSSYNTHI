@@ -1,0 +1,112 @@
+% Load the LUT
+lutFile = '/Users/George/Documents/EMS Synthi Folders/Cut_Off_Knob_Resoance_0EMS/RefinedFilterLUT_96kHz.mat';
+if isfile(lutFile)
+    data = load(lutFile, 'refinedLUT');
+    LUT = data.refinedLUT;
+    disp('LUT loaded successfully.');
+else
+    error('LUT file not found: %s', lutFile);
+end
+
+% Sampling rate
+fs = 96000; % 96 kHz
+
+% Define number of cutoff & resonance points
+numCutoffPoints = 7;  
+numResonancePoints = 5;  
+
+% Generate evenly spaced indices
+cutoffIndices = round(linspace(1, size(LUT, 1), numCutoffPoints));
+resonanceIndices = round(linspace(1, size(LUT, 2), numResonancePoints));
+
+% Create main figure
+fig = figure('Name', 'Detailed Filter Frequency Response', 'NumberTitle', 'off', 'Color', 'w', ...
+    'Position', [100, 100, 1000, 700]); % Wider for better visibility
+
+% Create main plot axis
+ax = axes('Parent', fig, 'Position', [0.1, 0.2, 0.75, 0.7]); % Adjusted for space
+hold(ax, 'on');
+xlabel(ax, 'Frequency (Hz)', 'FontSize', 12, 'FontWeight', 'bold');
+ylabel(ax, 'Magnitude (dB)', 'FontSize', 12, 'FontWeight', 'bold');
+set(ax, 'XScale', 'log'); % Logarithmic scale
+set(ax, 'XTick', [20, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 20000]); 
+set(ax, 'YMinorGrid', 'on'); 
+xlim(ax, [20, 20000]); 
+ylim(ax, [-70, 5]); 
+grid(ax, 'on');
+title(ax, 'Filter Frequency Response (Interactive)', 'FontSize', 14, 'FontWeight', 'bold');
+
+% Colors
+colors = parula(numCutoffPoints * numResonancePoints);
+plots = gobjects(numCutoffPoints, numResonancePoints);
+
+% Scrollable panel for checkboxes
+panelHeight = min(600, (numCutoffPoints * numResonancePoints) * 25); % Dynamic height
+scrollPanel = uipanel('Parent', fig, 'Title', 'Filter Curves', 'FontSize', 10, ...
+    'Units', 'pixels', 'Position', [800, 80, 180, panelHeight], 'BackgroundColor', 'w');
+
+% Create scrollable list
+scrollableList = uicontrol('Style', 'listbox', 'Parent', scrollPanel, ...
+    'Units', 'normalized', 'Position', [0.05, 0.05, 0.9, 0.9], ...
+    'FontSize', 10, 'Max', 2, 'Min', 0, 'BackgroundColor', 'w');
+
+% Loop over cutoff and resonance values
+plotNames = {};
+for rIdx = 1:numResonancePoints
+    for cIdx = 1:numCutoffPoints
+        % Extract impulse response from LUT
+        impulseResponse = squeeze(LUT(cutoffIndices(cIdx), resonanceIndices(rIdx), :));
+
+        % Compute frequency response with **higher resolution**
+        [H, f] = freqz(impulseResponse, 1, 8192, fs); % 8192 bins for more granularity
+        magResponse = 20*log10(abs(H));
+
+        % Store plot handles
+        plotIndex = (rIdx - 1) * numCutoffPoints + cIdx;
+        plots(cIdx, rIdx) = plot(ax, f, magResponse, 'Color', colors(plotIndex, :), 'LineWidth', 1.8, ...
+            'DisplayName', sprintf('Cutoff: %.2f, Res: %.2f', ...
+            (cutoffIndices(cIdx)-1)/(size(LUT, 1)-1), ...
+            (resonanceIndices(rIdx)-1)/(size(LUT, 2)-1)));
+
+        % Store names for checkbox list
+        plotNames{end+1} = sprintf('C: %.2f | R: %.2f', ...
+            (cutoffIndices(cIdx)-1)/(size(LUT, 1)-1), ...
+            (resonanceIndices(rIdx)-1)/(size(LUT, 2)-1));
+    end
+end
+
+% Populate listbox with names
+scrollableList.String = plotNames;
+scrollableList.Value = 1:numel(plotNames); % Initially select all
+
+% Toggle function for list selection
+scrollableList.Callback = @(src, ~) togglePlots(src, plots, ax);
+
+legend(ax, 'show', 'Location', 'northeast');
+
+% Function to toggle selected plots
+function togglePlots(src, plots, ax)
+    selected = src.Value; 
+    allPlots = findobj(ax, 'Type', 'line');
+    
+    % Hide all first
+    set(allPlots, 'Visible', 'off');
+    
+    % Make selected plots visible
+    for i = selected
+        set(plots(i), 'Visible', 'on');
+    end
+    
+    % Update legend
+    updateLegend(ax);
+end
+
+% Function to update legend dynamically
+function updateLegend(ax)
+    visiblePlots = findobj(ax, 'Type', 'line', 'Visible', 'on');
+    if isempty(visiblePlots)
+        legend(ax, 'off');
+    else
+        legend(ax, visiblePlots, 'Location', 'northeast');
+    end
+end
