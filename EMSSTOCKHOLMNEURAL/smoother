@@ -1,0 +1,93 @@
+% Select LUT File
+[file, path] = uigetfile('*.mat', 'Select LUT File to Resample');
+if isequal(file, 0)
+    error('No LUT file selected. Please select a valid .mat file.');
+end
+filePath = fullfile(path, file);
+data = load(filePath);
+
+% Display available variables
+varNames = fieldnames(data);
+disp('Variables detected in LUT file:');
+disp(varNames);
+
+% Dynamically detect cutoff and resonance variables
+cutoffValues = [];
+resonanceValues = [];
+
+% Identify possible cutoff names
+possibleCutoffNames = {'cutoff', 'cutoffValues', 'refinedLUT'};
+possibleResonanceNames = {'resonance', 'resonanceValues'};
+
+% Find the correct cutoff variable
+for i = 1:length(possibleCutoffNames)
+    if isfield(data, possibleCutoffNames{i})
+        cutoffValues = data.(possibleCutoffNames{i});
+        disp(['Matched cutoff to "', possibleCutoffNames{i}, '".']);
+        break;
+    end
+end
+
+% Find the correct resonance variable
+for i = 1:length(possibleResonanceNames)
+    if isfield(data, possibleResonanceNames{i})
+        resonanceValues = data.(possibleResonanceNames{i});
+        disp(['Matched resonance to "', possibleResonanceNames{i}, '".']);
+        break;
+    end
+end
+
+% Ensure valid LUT data
+if isempty(cutoffValues) || isempty(resonanceValues)
+    error('Invalid LUT file: Could not find cutoff or resonance data.');
+end
+
+% Ensure `cutoffValues` is a column vector
+cutoffValues = cutoffValues(:);
+
+% **Fix: Ensure `resonanceValues` has correct dimensions**
+[numRows, numCols] = size(resonanceValues);
+if numRows == 1 && numCols > 1
+    % Transpose if resonanceValues is a row vector
+    resonanceValues = resonanceValues';
+    disp('Fixed resonanceValues shape (transposed to match cutoff).');
+end
+
+% Ensure `cutoffValues` and `resonanceValues` have matching rows
+if size(resonanceValues, 1) ~= length(cutoffValues)
+    error('Mismatch: cutoffValues and resonanceValues must have the same number of rows.');
+end
+
+% Sorting to maintain correct order
+[cutoffValues, sortIdx] = sort(cutoffValues);
+resonanceValues = resonanceValues(sortIdx, :); % Ensure resonance stays aligned
+
+% Define higher-resolution grid
+numNewPoints = 1000;
+newCutoff = linspace(min(cutoffValues), max(cutoffValues), numNewPoints)';
+
+% Interpolate resonanceValues to match new cutoff size
+disp('Interpolating resonanceValues to match cutoff size...');
+newResonance = zeros(numNewPoints, size(resonanceValues, 2));
+
+for i = 1:size(resonanceValues, 2)
+    newResonance(:, i) = interp1(cutoffValues, resonanceValues(:, i), newCutoff, 'pchip', 'extrap');
+end
+
+% Normalize to maintain amplitude scale
+scalingFactor = max(abs(resonanceValues(:))) / max(abs(newResonance(:)));
+newResonance = newResonance * scalingFactor;
+
+disp('Upscaling completed. Saving...');
+
+% Save new LUT
+[fileSave, pathSave] = uiputfile('*.mat', 'Save High-Resolution LUT As');
+if isequal(fileSave, 0)
+    disp('Save operation canceled.');
+else
+    cutoffValues = newCutoff;
+    resonanceValues = newResonance;
+    save(fullfile(pathSave, fileSave), 'cutoffValues', 'resonanceValues');
+    disp(['High-resolution LUT saved as ', fullfile(pathSave, fileSave)]);
+end
+
